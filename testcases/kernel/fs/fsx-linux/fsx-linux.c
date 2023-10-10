@@ -39,8 +39,10 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#if defined(_UWIN) || defined(__linux__)
+#if defined(_UWIN) || defined(__linux__) || defined(__VXWORKS__)
+#if !defined(__VXWORKS__)
 #include <sys/param.h>
+#endif
 #include <limits.h>
 #include <time.h>
 #include <string.h>
@@ -59,6 +61,10 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <errno.h>
+#if !defined(__VXWORKS__)
+#define TST_NO_DEFAULT_MAIN
+#include "tst_timer.h"
+#endif
 
 /*
  *	A log entry is an operation and a bunch of arguments.
@@ -87,6 +93,11 @@ int logcount = 0;		/* total ops */
 #define OP_MAPREAD	5
 #define OP_MAPWRITE	6
 #define OP_SKIPPED	7
+#if defined(__VXWORKS__)
+#define CLOCK_ID CLOCK_MONOTONIC
+#else
+#define CLOCK_ID CLOCK_MONOTONIC_RAW
+#endif
 
 int page_size;
 int page_mask;
@@ -127,6 +138,23 @@ int mapped_reads = 1;		/* -R flag disables it */
 int fsxgoodfd = 0;
 FILE *fsxlogf = NULL;
 int badoff = -1;
+
+#if defined(__VXWORKS__)
+static inline struct timespec
+tst_timespec_diff(struct timespec ts1, struct timespec ts2)
+{
+	struct timespec res;
+
+	if (ts1.tv_nsec < ts2.tv_nsec) {
+		ts1.tv_nsec += 1000000000;
+		ts1.tv_sec -= 1; 
+	}
+	res.tv_sec = ts1.tv_sec - ts2.tv_sec;
+	res.tv_nsec = ts1.tv_nsec - ts2.tv_nsec;
+
+	return res;
+}
+#endif
 
 void vwarnc(int code,const char *fmt, va_list ap)
 {
@@ -849,7 +877,12 @@ void domapwrite(unsigned offset, unsigned size)
 		gettimeofday(&t, NULL);
 		prt("       %lu.%06lu memcpy done\n", t.tv_sec, t.tv_usec);
 	}
-	if (msync(p, map_size, 0) != 0) {
+#if defined(__VXWORKS__)
+	if (msync(p, map_size, MS_SYNC) != 0)
+#else
+	if (msync(p, map_size, 0) != 0) 
+#endif
+	{
 		prterr("domapwrite: msync");
 		report_failure(203);
 	}
@@ -1115,11 +1148,12 @@ int main(int argc, char **argv)
 	int i, style, ch;
 	char *endp;
 	int dirpath = 0;
-
+	struct timespec time_start, time_end, time_diff;
+	
 	goodfile[0] = 0;
 	logfile[0] = 0;
 
-	page_size = getpagesize();
+	page_size = (int)sysconf(_SC_PAGESIZE);
 	page_mask = page_size - 1;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);	/* line buffered stdout */
@@ -1267,9 +1301,12 @@ int main(int argc, char **argv)
 	signal(SIGUSR1, cleanup);
 	signal(SIGUSR2, cleanup);
 
+#if defined(__VXWORKS__)
+	srand(seed);
+#else
 	initstate(seed, state, 256);
 	setstate(state);
-
+#endif
 	open_test_files(argv, argc);
 
 	strncat(goodfile, dirpath ? basename(fname) : fname, 256);
@@ -1336,11 +1373,17 @@ int main(int argc, char **argv)
 	} else
 		check_trunc_hack();
 
+	clock_gettime(CLOCK_ID, &time_start);
 	while (numops == -1 || numops--)
 		test();
 
 	close_test_files();
+	clock_gettime(CLOCK_ID, &time_end);
 	prt("All operations completed A-OK!\n");
+
+	time_diff = tst_timespec_diff(time_end, time_start);
+	prt("Elapsed Test Time %lu.%09lu\n",
+        (unsigned long)time_diff.tv_sec, time_diff.tv_nsec);
 
 	if (tf_buf)
 		free(tf_buf);
